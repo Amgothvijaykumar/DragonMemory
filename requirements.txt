@@ -1,0 +1,6 @@
+torch
+numpy
+pandas
+requests
+sentence-transformers
+tqdm
