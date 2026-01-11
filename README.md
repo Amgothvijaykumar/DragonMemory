@@ -31,9 +31,15 @@ pip install -r requirements.txt
 Run the training/inference script:
 
 ```bash
-python train.py
+python predict.py
 ```
 
 ### Output
 
 After running the script, the predictions will be saved to a file named **`results.csv`**.
+
+## Optional
+
+In the `Optional` folder, I have tried with representation learning. Follow the above steps to run it same.
+
+

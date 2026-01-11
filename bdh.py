@@ -14,7 +14,7 @@ class BDHConfig:
     n_embd: int = 256
     dropout: float = 0.1
     n_head: int = 4
-    mlp_internal_dim_multiplier: int = 128
+    mlp_internal_dim_multiplier: int = 256
     vocab_size: int = 256
 
 
@@ -106,7 +106,7 @@ class BDH(nn.Module):
         elif isinstance(module, nn.Embedding):
             nn.init.normal_(module.weight, mean=0.0, std=0.02)
 
-    def forward(self, idx, targets=None):
+    def forward(self, idx, targets=None, return_hidden=False):
         C = self.config
 
         B, T = idx.size()
@@ -147,6 +147,10 @@ class BDH(nn.Module):
         loss = None
         if targets is not None:
             loss = F.cross_entropy(logits.view(-1, logits.size(-1)), targets.view(-1))
+        
+        if return_hidden:
+            hidden = x.view(B, T, D)   # <-- representation
+            return logits, loss, hidden
 
         return logits, loss
 

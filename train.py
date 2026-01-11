@@ -1,21 +1,25 @@
-# train.py
-# Track B — BDH loss-based narrative consistency evaluation
+# train_and_eval_optionA.py
+# OPTION A: Claim-only masked loss + contrastive scoring
+# Improves accuracy & robustness without changing BDH internals
 
+import os
 import torch
+import torch.nn.functional as F
 import pandas as pd
+import numpy as np
 
 from transformers import GPT2Tokenizer
+from sklearn.metrics import accuracy_score, f1_score, classification_report
+
 from bdh import BDH, BDHConfig
 
 
 # ======================================================
-# 1. Paths & dataset files (MATCH YOUR CSVs)
+# 1. Paths
 # ======================================================
 
 DATA_DIR = "data/"
-
 TRAIN_CSV = DATA_DIR + "train.csv"
-TEST_CSV  = DATA_DIR + "test.csv"
 
 NOVELS = {
     "the count of monte cristo": DATA_DIR + "The_Count_of_Monte_Cristo.txt",
@@ -24,29 +28,24 @@ NOVELS = {
 
 
 # ======================================================
-# 2. Utilities
+# 2. Load novels
 # ======================================================
 
 def load_text(path):
     with open(path, "r", encoding="utf-8") as f:
         return f.read()
 
-
-NOVEL_CACHE = {
-    key: load_text(path)
-    for key, path in NOVELS.items()
-}
-
+NOVEL_CACHE = {k: load_text(v) for k, v in NOVELS.items()}
 
 def get_novel_text(book_name):
     key = book_name.strip().lower()
     if key not in NOVEL_CACHE:
-        raise ValueError(f"Unknown book name in CSV: {book_name}")
+        raise ValueError(f"Unknown book name: {book_name}")
     return NOVEL_CACHE[key]
 
 
 # ======================================================
-# 3. Tokenizer & BDH initialization (CORRECT API)
+# 3. Tokenizer + BDH
 # ======================================================
 
 tokenizer = GPT2Tokenizer.from_pretrained("gpt2")
@@ -64,40 +63,73 @@ model.eval()
 
 
 # ======================================================
-# 4. Core BDH scoring logic (THIS IS THE KEY)
+# 4. Claim-only masked loss (CORE FIX)
 # ======================================================
 
-def compute_bdh_loss(context_text, max_tokens=2048):
+def compute_claim_loss(novel_text, claim_text, max_tokens=2048):
     """
-    Runs BDH in teacher-forcing mode and returns scalar loss.
-    Lower loss => more compatible with narrative.
+    Computes NLL(claim | novel) by masking novel tokens.
     """
-    tokens = tokenizer(
-        context_text,
+
+    novel_ids = tokenizer(
+        novel_text,
         return_tensors="pt",
         truncation=True,
-        max_length=max_tokens,
+        max_length=max_tokens // 2,
         padding=False
     )["input_ids"]
 
+    claim_ids = tokenizer(
+        "\n\n" + claim_text,
+        return_tensors="pt",
+        truncation=True,
+        max_length=max_tokens // 2,
+        padding=False
+    )["input_ids"]
+
+    input_ids = torch.cat([novel_ids, claim_ids], dim=1)
+    targets = input_ids.clone()
+
+    # mask novel tokens
+    novel_len = novel_ids.size(1)
+    targets[:, :novel_len] = -100  # ignore_index
+
     with torch.no_grad():
-        out = model(tokens, tokens)
+        logits, _ = model(input_ids, targets=None)
 
-    # BDH may return loss or (loss, loss)
-    if isinstance(out, tuple):
-        loss = out[0]
-    else:
-        loss = out
+    vocab = logits.size(-1)
+    logits = logits.view(-1, vocab)
+    targets = targets.view(-1)
 
-    return loss.mean().item()
+    loss = F.cross_entropy(
+        logits,
+        targets,
+        ignore_index=-100,
+        reduction="mean"
+    )
 
+    return loss.item()
 
 
 # ======================================================
-# 5. TRAIN.CSV — threshold calibration (NOT training)
+# 5. Contrastive scoring (ROBUSTNESS FIX)
 # ======================================================
 
-print("Running BDH analysis on train.csv...")
+def compute_contrastive_score(novel_text, claim_text):
+    """
+    score = NLL(claim | novel) - NLL(claim | empty)
+    Lower score => more consistent
+    """
+    loss_with_context = compute_claim_loss(novel_text, claim_text)
+    loss_no_context = compute_claim_loss("", claim_text)
+    return loss_with_context - loss_no_context
+
+
+# ======================================================
+# 6. Run on TRAIN set
+# ======================================================
+
+print("\nRunning Option A (masked + contrastive) on train.csv...\n")
 
 train_df = pd.read_csv(TRAIN_CSV)
 
@@ -106,52 +138,66 @@ labels = []
 
 for row in train_df.itertuples():
     novel = get_novel_text(row.book_name)
-    context = novel + "\n\n" + row.content
+    score = compute_contrastive_score(novel, row.content)
 
-    loss = compute_bdh_loss(context)
-    scores.append(loss)
+    scores.append(score)
     labels.append(row.label)
 
-    print(f"[TRAIN] Loss: {loss:.4f} | Label: {row.label}")
-
-
-# Simple threshold: midpoint between class means
-consistent_losses = [s for s, l in zip(scores, labels) if l == "consistent"]
-contradict_losses = [s for s, l in zip(scores, labels) if l == "contradict"]
-
-THRESHOLD = (sum(consistent_losses)/len(consistent_losses) +
-             sum(contradict_losses)/len(contradict_losses)) / 2
-
-print(f"\nChosen loss threshold: {THRESHOLD:.4f}")
+    print(f"[TRAIN] Score: {score:.4f} | Label: {row.label}")
 
 
 # ======================================================
-# 6. TEST.CSV — final inference
+# 7. Threshold optimization
 # ======================================================
 
-print("\nRunning BDH inference on test.csv...")
+print("\nSearching for best threshold...\n")
 
-test_df = pd.read_csv(TEST_CSV)
-predictions = []
+scores_np = np.array(scores)
+best_threshold = None
+best_f1 = 0
+best_acc = 0
 
-for row in test_df.itertuples():
-    novel = get_novel_text(row.book_name)
-    context = novel + "\n\n" + row.content
+for t in np.linspace(scores_np.min(), scores_np.max(), 300):
+    preds = ["consistent" if s < t else "contradict" for s in scores_np]
+    f1 = f1_score(labels, preds, pos_label="consistent")
+    acc = accuracy_score(labels, preds)
 
-    loss = compute_bdh_loss(context)
-    pred = "consistent" if loss < THRESHOLD else "contradict"
-    predictions.append(pred)
+    if f1 > best_f1:
+        best_f1 = f1
+        best_acc = acc
+        best_threshold = t
+
+print(f"Best threshold: {best_threshold:.4f}")
+print(f"Best F1-score: {best_f1:.3f}")
+print(f"Best Accuracy: {best_acc:.3f}")
 
 
 # ======================================================
-# 7. Save output
+# 8. Final diagnostic report
 # ======================================================
 
-output = pd.DataFrame({
-    "id": test_df.id,
-    "prediction": predictions
-})
+final_preds = ["consistent" if s < best_threshold else "contradict" for s in scores_np]
 
-output.to_csv("results.csv", index=False)
+print("\nFinal TRAIN classification report (diagnostic):\n")
+print(
+    classification_report(
+        labels,
+        final_preds,
+        labels=["consistent", "contradict"],
+        target_names=["Consistent", "Contradict"]
+    )
+)
+SAVE_DIR = "checkpoints/"
+os.makedirs(SAVE_DIR, exist_ok=True)
 
-print("\nSaved results.csv")
+# save threshold
+with open(SAVE_DIR + "threshold.txt", "w") as f:
+    f.write(str(best_threshold))
+
+# save config
+torch.save(config, SAVE_DIR + "bdh_config_threshold.pt")
+
+# OPTIONAL: save BDH weights if pretrained
+torch.save(model.state_dict(), SAVE_DIR + "bdh_model.pt")
+
+print("Saved threshold and BDH config.")
