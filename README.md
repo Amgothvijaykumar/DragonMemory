@@ -4,6 +4,9 @@ This repository contains the implementation of the BDH (Dragon Hatchling) model 
 
 ## Setup Instructions
 
+> [!IMPORTANT]
+> **Evaluator Note:** Please ensure the `test.csv` file is placed in the `data` folder before proceeding with the steps below.
+
 ### 1. Create and Activate Virtual Environment
 
 **Mac/Linux:**

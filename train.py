@@ -194,10 +194,4 @@ os.makedirs(SAVE_DIR, exist_ok=True)
 with open(SAVE_DIR + "threshold.txt", "w") as f:
     f.write(str(best_threshold))
 
-# save config
-torch.save(config, SAVE_DIR + "bdh_config_threshold.pt")
-
-# OPTIONAL: save BDH weights if pretrained
-torch.save(model.state_dict(), SAVE_DIR + "bdh_model.pt")
-
 print("Saved threshold and BDH config.")
